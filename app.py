@@ -225,24 +225,24 @@ def run_scanner():
     ts = datetime.now(IST).strftime('%H:%M:%S')
     state['log'].append(f"[{ts}] 🔍 Scan started — {len(UNIVERSE)} stocks")
 
-    results = []
+    order = {'C3_BREAKOUT': 0, 'INSIDE_BAR': 1, 'BASE': 2}
+    state['watchlist'] = []  # clear previous results at scan start
+
     for symbol in UNIVERSE:
         result = analyze_vcp(symbol)
         if result:
-            results.append(result)
+            # Add immediately — frontend sees it right away
+            state['watchlist'].append(result)
+            state['watchlist'].sort(key=lambda x: (order.get(x['signal_type'], 9), -x['rvol']))
             state['log'].append(
                 f"[{datetime.now(IST).strftime('%H:%M:%S')}] ✅ {symbol} — {result['signal']}"
             )
         time.sleep(0.38)  # ~2.5 req/sec — safe under Kite rate limits
 
-    order = {'C3_BREAKOUT': 0, 'INSIDE_BAR': 1, 'BASE': 2}
-    results.sort(key=lambda x: (order.get(x['signal_type'], 9), -x['rvol']))
-
-    state['watchlist'] = results
     state['scanning']  = False
     state['last_scan'] = datetime.now(IST).strftime('%d %b %Y, %I:%M %p IST')
     state['log'].append(
-        f"[{datetime.now(IST).strftime('%H:%M:%S')}] ✅ Done — {len(results)} signals found"
+        f"[{datetime.now(IST).strftime('%H:%M:%S')}] ✅ Done — {len(state['watchlist'])} signals found"
     )
     state['log'] = state['log'][-60:]
 
@@ -467,10 +467,14 @@ function triggerScan(){
 function pollStatus(){
   setTimeout(()=>{
     fetch('/api/status').then(r=>r.json()).then(d=>{
-      if(d.scanning)pollStatus();
-      else location.reload();
+      if(d.scanning){
+        location.reload();   // reload every 10s during scan to show new cards
+        setTimeout(pollStatus, 10000);
+      } else {
+        location.reload();   // final reload when done
+      }
     });
-  },5000);
+  },10000);
 }
 
 function filter(type){
