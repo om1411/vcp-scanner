@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 VCP Live Scanner — Zerodha Kite Connect
-Volatility Contraction Pattern auto-scanner for Nifty 500
+Volatility Contraction Pattern auto-scanner — All NSE Stocks
 """
 
 from flask import Flask, request, redirect, jsonify, render_template_string
@@ -23,7 +23,6 @@ app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'vcp-scanner-secret-xyz-2024
 
 API_KEY    = os.environ.get('KITE_API_KEY', '')
 API_SECRET = os.environ.get('KITE_API_SECRET', '')
-BASE_URL   = os.environ.get('BASE_URL', 'http://localhost:5000')
 
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -38,52 +37,32 @@ state = {
     'instruments': {}
 }
 
-# ── Nifty 500 Universe ────────────────────────────────────
-UNIVERSE = [
-    "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC","SBIN",
-    "BHARTIARTL","KOTAKBANK","LT","AXISBANK","ASIANPAINT","MARUTI","SUNPHARMA",
-    "TITAN","BAJFINANCE","WIPRO","ULTRACEMCO","ONGC","NTPC","POWERGRID",
-    "TECHM","HCLTECH","COALINDIA","INDUSINDBK","BAJAJFINSV","TATAMOTORS",
-    "ADANIENT","ADANIPORTS","DIVISLAB","DRREDDY","EICHERMOT","GRASIM",
-    "HEROMOTOCO","HINDALCO","JSWSTEEL","M&M","NESTLEIND","SBILIFE",
-    "TATASTEEL","TATACONSUM","VEDL","BPCL","BRITANNIA","CIPLA","DABUR",
-    "GODREJCP","HAVELLS","HDFCLIFE","LUPIN","MARICO","PIDILITIND",
-    "SIEMENS","TORNTPHARM","TRENT","ZOMATO","IRCTC","CHOLAFIN",
-    "MUTHOOTFIN","BAJAJ-AUTO","BOSCHLTD","CUMMINSIND","TVSMOTOR",
-    "ASHOKLEY","BHARATFORG","ESCORTS","SRF","ASTRAL","AUROPHARMA",
-    "BIOCON","GLENMARK","LALPATHLAB","MAXHEALTH","ABBOTINDIA","ALKEM",
-    "APOLLOHOSP","APOLLOTYRE","AUBANK","BANDHANBNK","BANKBARODA",
-    "BEL","BHEL","CANBK","DMART","FEDERALBNK","GAIL","HAL",
-    "HDFCAMC","IDFCFIRSTB","IGL","INDHOTEL","INDIANB","IOC",
-    "IRFC","JSWENERGY","MCX","MPHASIS","MRF","NHPC","NMDC",
-    "PAGEIND","PERSISTENT","POLYCAB","PRESTIGE","PVRINOX","SBICARD",
-    "SUPREMEIND","TATACHEM","TATACOMM","TATAPOWER","UTIAMC","VOLTAS",
-    "ZYDUSLIFE","ANGELONE","ABCAPITAL","ABB","APLAPOLLO","COFORGE",
-    "COLPAL","CONCOR","CROMPTON","DEEPAKNTR","DIXON","EMAMILTD",
-    "HAPPSTMNDS","INTELLECT","IEX","KPITTECH","LTIM","LTTS",
-    "LUXIND","NAVINFLUOR","OBEROIRLTY","OFSS","PHOENIXLTD","RVNL",
-    "SAIL","SHREECEM","SOLARINDS","SONACOMS","SUNDARMFIN","SYNGENE",
-    "TANLA","TIMKEN","UCOBANK","UNIONBANK","WOCKPHARMA","ZEEL",
-    "BALKRISIND","BATAINDIA","BERGEPAINT","CDSL","FINEORG","GUJGASLTD",
-    "HINDPETRO","KAJARIACER","KEI","KNRCON","NBCC","NCC","RITES",
-    "SJVN","SKFINDIA","SYMPHONY","THERMAX","TRITURBINE","UJJIVANSFB",
-    "VGUARD","WELCORP","WHIRLPOOL","L&TFH","LICI","PGHH",
-    "INDUSTOWER","NYKAA","DELHIVERY","JIOFIN","JKCEMENT","JUBLFOOD",
-    "LINDEINDIA","MTAR","NATIONALUM","PNBHOUSING","PNB","SPARC",
-    "SUNDRMFAST","TTKPRESTIG","UNITDSPR","CAMS","KFINTECH",
-    "LATENTVIEW","NSLNISP","SJVN","ANGELONE","POLICYBZR",
-]
+UNIVERSE = []  # filled dynamically after login
 
-# ── Load Instruments ──────────────────────────────────────
+# ── Load Instruments + Build Universe ────────────────────
 def load_instruments(kite):
+    global UNIVERSE
     try:
         instruments = kite.instruments("NSE")
+
+        # Token map for all NSE EQ stocks
         state['instruments'] = {
             i['tradingsymbol']: i['instrument_token']
             for i in instruments
             if i['exchange'] == 'NSE' and i['instrument_type'] == 'EQ'
         }
-        logger.info(f"Loaded {len(state['instruments'])} instruments")
+
+        # Pre-filter: remove penny stocks (price < ₹20)
+        UNIVERSE = [
+            i['tradingsymbol']
+            for i in instruments
+            if (i['exchange'] == 'NSE' and
+                i['instrument_type'] == 'EQ' and
+                float(i.get('last_price') or 0) >= 20)
+        ]
+
+        logger.info(f"Instruments loaded: {len(state['instruments'])} | Universe: {len(UNIVERSE)} stocks")
+
     except Exception as e:
         logger.error(f"Instrument load error: {e}")
 
@@ -112,6 +91,10 @@ def analyze_vcp(symbol):
         df.columns = [c.lower() for c in df.columns]
         df = df.sort_values('date').reset_index(drop=True)
 
+        # ── Pre-check: skip illiquid stocks ───────────
+        if df['volume'].tail(5).mean() < 50_000:
+            return None
+
         # ── Filter 1: 3M performance > 30% ────────────
         perf_3m = (df['close'].iloc[-1] - df['close'].iloc[-63]) / df['close'].iloc[-63] * 100
         if perf_3m < 30:
@@ -134,17 +117,15 @@ def analyze_vcp(symbol):
         c1     = df.iloc[-3]   # potential C1
 
         # ── R_Vol ──────────────────────────────────────
-        # 20-day SMA of volumes BEFORE yesterday (avoids in-progress bar)
         avg_vol_20 = df['volume'].iloc[-22:-2].mean()
         rvol = (latest['volume'] / avg_vol_20 * 100) if avg_vol_20 > 0 else 0
 
         # ── EMA Structure ──────────────────────────────
-        above_50ema = latest['close'] > latest['ema50']
+        above_50ema   = latest['close'] > latest['ema50']
         ema_reclaimed = (latest['close'] > latest['ema10'] and
                          latest['close'] > latest['ema20'])
 
         # ── Volume Contraction ─────────────────────────
-        # Avg of last 5 bars volume < avg of 5 bars before that
         recent_avg = df['volume'].iloc[-6:-1].mean()
         prior_avg  = df['volume'].iloc[-11:-6].mean()
         vol_drying = recent_avg < prior_avg
@@ -152,7 +133,7 @@ def analyze_vcp(symbol):
         # ── Inside Bar: C1=c1, C2=c2 ──────────────────
         is_inside = c2['high'] < c1['high'] and c2['low'] > c1['low']
 
-        # ── C3 Breakout: latest breaks above both ──────
+        # ── C3 Breakout ────────────────────────────────
         breakout_level = max(c1['high'], c2['high'])
         is_c3 = (
             is_inside and
@@ -192,12 +173,12 @@ def analyze_vcp(symbol):
             return None
 
         # ── Stop Loss & Target ─────────────────────────
-        sl_price = min(c1['low'], c2['low']) * 0.999 if is_inside else latest['ema50'] * 0.99
-        risk     = max(latest['close'] - sl_price, 0.01)
-        target5r = latest['close'] + (risk * 5)
-        target10r= latest['close'] + (risk * 10)
+        sl_price  = min(c1['low'], c2['low']) * 0.999 if is_inside else latest['ema50'] * 0.99
+        risk      = max(latest['close'] - sl_price, 0.01)
+        target5r  = latest['close'] + (risk * 5)
+        target10r = latest['close'] + (risk * 10)
 
-        # ── Change % today ─────────────────────────────
+        # ── Day change % ───────────────────────────────
         chg_pct = (latest['close'] - df.iloc[-2]['close']) / df.iloc[-2]['close'] * 100
 
         return {
@@ -242,9 +223,8 @@ def run_scanner():
             state['log'].append(
                 f"[{datetime.now(IST).strftime('%H:%M:%S')}] ✅ {symbol} — {result['signal']}"
             )
-        time.sleep(0.38)   # ~2.5 req/sec — safe under Kite rate limits
+        time.sleep(0.38)  # ~2.5 req/sec — safe under Kite rate limits
 
-    # Sort: C3 first → C2 → Base; within each, highest R_Vol first
     order = {'C3_BREAKOUT': 0, 'INSIDE_BAR': 1, 'BASE': 2}
     results.sort(key=lambda x: (order.get(x['signal_type'], 9), -x['rvol']))
 
@@ -259,9 +239,9 @@ def run_scanner():
 def auto_scan_loop():
     """Scan every 10 min during market hours (9:15–15:30 IST, Mon–Fri)"""
     while True:
-        now   = datetime.now(IST)
-        open_ = now.replace(hour=9,  minute=15, second=0, microsecond=0)
-        close_= now.replace(hour=15, minute=30, second=0, microsecond=0)
+        now    = datetime.now(IST)
+        open_  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
+        close_ = now.replace(hour=15, minute=30, second=0, microsecond=0)
         if open_ <= now <= close_ and now.weekday() < 5:
             threading.Thread(target=run_scanner, daemon=True).start()
             time.sleep(600)
@@ -302,7 +282,7 @@ HTML = r"""
       <div class="w-9 h-9 rounded-xl flex items-center justify-center text-xl font-bold" style="background:linear-gradient(135deg,#10b981,#059669)">V</div>
       <div>
         <div class="font-bold text-white text-sm leading-tight">VCP Live Scanner</div>
-        <div class="text-xs text-gray-500">Nifty 500 · Zerodha</div>
+        <div class="text-xs text-gray-500">All NSE Stocks · Zerodha</div>
       </div>
     </div>
     <div class="flex items-center gap-2.5">
@@ -325,19 +305,18 @@ HTML = r"""
 </nav>
 
 {% if not authenticated %}
-<!-- LOGIN SCREEN -->
 <div class="max-w-md mx-auto mt-20 px-4 text-center">
   <div class="glass rounded-2xl p-10">
     <div class="text-5xl mb-5">📈</div>
     <h1 class="text-2xl font-bold text-white mb-2">VCP Live Scanner</h1>
-    <p class="text-gray-400 text-sm mb-8">Scan Nifty 500 automatically for Volatility Contraction Pattern setups — C3 breakouts, inside bars, and volume signals.</p>
+    <p class="text-gray-400 text-sm mb-8">Scan all NSE stocks automatically for Volatility Contraction Pattern setups — C3 breakouts, inside bars, and volume signals.</p>
     <a href="/login"
        class="inline-block w-full py-3 rounded-xl font-semibold text-black transition hover:opacity-90"
        style="background:linear-gradient(135deg,#10b981,#059669)">
       🔐 Login with Zerodha
     </a>
     <div class="mt-8 grid grid-cols-3 gap-3">
-      <div class="glass rounded-xl p-3"><div class="text-xl mb-1">🔍</div><div class="text-xs text-gray-400">Nifty 500<br>Universe</div></div>
+      <div class="glass rounded-xl p-3"><div class="text-xl mb-1">🔍</div><div class="text-xs text-gray-400">All NSE<br>Stocks</div></div>
       <div class="glass rounded-xl p-3"><div class="text-xl mb-1">⚡</div><div class="text-xs text-gray-400">C3 Breakout<br>Alerts</div></div>
       <div class="glass rounded-xl p-3"><div class="text-xl mb-1">🎯</div><div class="text-xs text-gray-400">Auto SL &<br>1:5 Target</div></div>
     </div>
@@ -345,58 +324,52 @@ HTML = r"""
 </div>
 
 {% else %}
-<!-- DASHBOARD -->
 <div class="max-w-7xl mx-auto px-4 py-4">
 
-  <!-- Stats -->
   <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
     <div class="glass rounded-xl p-3.5">
       <div class="text-xs text-gray-500 mb-1">Total Signals</div>
-      <div class="text-2xl font-bold text-white" id="totalCount">{{ watchlist|length }}</div>
+      <div class="text-2xl font-bold text-white">{{ watchlist|length }}</div>
     </div>
     <div class="glass rounded-xl p-3.5">
       <div class="text-xs text-gray-500 mb-1">🟢 Buy (C3)</div>
-      <div class="text-2xl font-bold" style="color:#10b981" id="c3Count">
+      <div class="text-2xl font-bold" style="color:#10b981">
         {{ watchlist | selectattr('signal_type','eq','C3_BREAKOUT') | list | length }}
       </div>
     </div>
     <div class="glass rounded-xl p-3.5">
       <div class="text-xs text-gray-500 mb-1">🟡 Watch (C2)</div>
-      <div class="text-2xl font-bold" style="color:#f59e0b" id="c2Count">
+      <div class="text-2xl font-bold" style="color:#f59e0b">
         {{ watchlist | selectattr('signal_type','eq','INSIDE_BAR') | list | length }}
       </div>
     </div>
     <div class="glass rounded-xl p-3.5">
       <div class="text-xs text-gray-500 mb-1">Last Scan</div>
-      <div class="text-xs font-semibold text-gray-300 mt-1" id="lastScan">{{ last_scan or '—' }}</div>
+      <div class="text-xs font-semibold text-gray-300 mt-1">{{ last_scan or '—' }}</div>
     </div>
   </div>
 
-  <!-- Scanning Banner -->
   <div id="scanBanner" class="hidden mb-4 rounded-xl px-4 py-3 flex items-center gap-3 text-sm"
        style="background:rgba(29,78,216,.15);border:1px solid #1d4ed8;color:#93c5fd">
     <span class="spin text-lg">⚙️</span>
-    <span>Scanning Nifty 500… Results appear below. Takes ~3–4 minutes.</span>
+    <span>Scanning all NSE stocks… Takes ~8–10 minutes. Results appear automatically.</span>
   </div>
 
   {% if watchlist %}
-  <!-- Filter Tabs -->
   <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
     <h2 class="text-sm font-semibold text-gray-300">📋 VCP Watchlist</h2>
     <div class="flex gap-2">
-      <button onclick="filter('all')"  id="f-all"   class="ftab active text-xs px-3 py-1.5 rounded-full">All ({{ watchlist|length }})</button>
-      <button onclick="filter('buy')"  id="f-buy"   class="ftab text-xs px-3 py-1.5 rounded-full">🟢 Buy</button>
+      <button onclick="filter('all')"   id="f-all"   class="ftab active text-xs px-3 py-1.5 rounded-full">All ({{ watchlist|length }})</button>
+      <button onclick="filter('buy')"   id="f-buy"   class="ftab text-xs px-3 py-1.5 rounded-full">🟢 Buy</button>
       <button onclick="filter('watch')" id="f-watch" class="ftab text-xs px-3 py-1.5 rounded-full">🟡 Watch</button>
-      <button onclick="filter('base')" id="f-base"  class="ftab text-xs px-3 py-1.5 rounded-full">🔵 Base</button>
+      <button onclick="filter('base')"  id="f-base"  class="ftab text-xs px-3 py-1.5 rounded-full">🔵 Base</button>
     </div>
   </div>
 
-  <!-- Cards -->
   <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3" id="grid">
   {% for s in watchlist %}
   <div class="rounded-xl p-4 {{ 'buy-card' if s.signal_type == 'C3_BREAKOUT' else ('watch-card' if s.signal_type == 'INSIDE_BAR' else 'base-card') }} stock-card"
        data-type="{{ s.signal_type }}">
-    <!-- Header -->
     <div class="flex items-start justify-between mb-3">
       <div>
         <div class="text-lg font-bold text-white leading-tight">{{ s.symbol }}</div>
@@ -412,55 +385,35 @@ HTML = r"""
         <div class="text-xs text-gray-400 mt-1">R_Vol <span class="font-bold {{ 'text-green-400' if s.rvol >= 110 else 'text-yellow-400' if s.rvol >= 80 else 'text-gray-400' }}">{{ s.rvol }}%</span></div>
       </div>
     </div>
-
-    <!-- Reasons -->
     <div class="space-y-1 mb-3 text-xs text-gray-300">
-      {% for r in s.reasons %}
-      <div>{{ r }}</div>
-      {% endfor %}
+      {% for r in s.reasons %}<div>{{ r }}</div>{% endfor %}
     </div>
-
-    <!-- EMA Chips -->
     <div class="flex flex-wrap gap-1 mb-3">
       <span class="tag" style="background:rgba(16,185,129,.15);color:#6ee7b7">EMA10 ₹{{ s.ema10 }}</span>
       <span class="tag" style="background:rgba(96,165,250,.15);color:#93c5fd">EMA20 ₹{{ s.ema20 }}</span>
       <span class="tag" style="background:rgba(167,139,250,.15);color:#c4b5fd">EMA50 ₹{{ s.ema50 }}</span>
     </div>
-
-    <!-- SL / Target -->
     <div class="grid grid-cols-3 gap-1 pt-2.5 border-t border-gray-700/50 text-center">
-      <div>
-        <div class="text-xs text-gray-500">Stop Loss</div>
-        <div class="text-sm font-bold text-red-400">₹{{ s.sl }}</div>
-      </div>
-      <div>
-        <div class="text-xs text-gray-500">Target 1:5</div>
-        <div class="text-sm font-bold text-green-400">₹{{ s.target_5r }}</div>
-      </div>
-      <div>
-        <div class="text-xs text-gray-500">Target 1:10</div>
-        <div class="text-sm font-bold" style="color:#34d399">₹{{ s.target_10r }}</div>
-      </div>
+      <div><div class="text-xs text-gray-500">Stop Loss</div><div class="text-sm font-bold text-red-400">₹{{ s.sl }}</div></div>
+      <div><div class="text-xs text-gray-500">Target 1:5</div><div class="text-sm font-bold text-green-400">₹{{ s.target_5r }}</div></div>
+      <div><div class="text-xs text-gray-500">Target 1:10</div><div class="text-sm font-bold" style="color:#34d399">₹{{ s.target_10r }}</div></div>
     </div>
-
     {% if s.breakout_level %}
     <div class="mt-2.5 py-1.5 rounded-lg text-center text-xs font-bold"
          style="background:rgba(16,185,129,.15);color:#34d399;border:1px solid rgba(16,185,129,.3)">
       ⚡ Breakout above ₹{{ s.breakout_level }}
     </div>
     {% endif %}
-
     <div class="mt-2 text-right text-xs text-gray-600">Updated {{ s.updated_at }}</div>
   </div>
   {% endfor %}
   </div>
 
   {% else %}
-  <!-- Empty State -->
   <div class="glass rounded-2xl p-16 text-center">
     <div class="text-5xl mb-4">🔭</div>
     <div class="text-gray-400 mb-2 font-medium">No VCP setups found yet</div>
-    <div class="text-gray-500 text-sm mb-6">Click "Scan Now" to search Nifty 500 for setups</div>
+    <div class="text-gray-500 text-sm mb-6">Click "Scan Now" to search all NSE stocks</div>
     <button onclick="triggerScan()" class="px-8 py-2.5 rounded-xl font-semibold text-sm text-black transition hover:opacity-90"
             style="background:linear-gradient(135deg,#10b981,#059669)">
       🔍 Start Scan
@@ -478,22 +431,18 @@ HTML = r"""
 </style>
 
 <script>
-// Market Status Badge
 function updateMarket(){
   const ist=new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'}));
   const h=ist.getHours(),m=ist.getMinutes(),d=ist.getDay();
-  const open=h>9||(h===9&&m>=15), close=h<15||(h===15&&m<=30), wd=d>=1&&d<=5;
+  const open=h>9||(h===9&&m>=15),close=h<15||(h===15&&m<=30),wd=d>=1&&d<=5;
   const el=document.getElementById('mktBadge');
   if(!el)return;
-  if(wd&&open&&close){
-    el.innerHTML='<span class="tag pulse" style="background:#064e3b;color:#6ee7b7;border:1px solid #10b981">● Market Open</span>';
-  } else {
-    el.innerHTML='<span class="tag" style="background:#1f2937;color:#6b7280">● Market Closed</span>';
-  }
+  el.innerHTML=wd&&open&&close
+    ?'<span class="tag pulse" style="background:#064e3b;color:#6ee7b7;border:1px solid #10b981">● Market Open</span>'
+    :'<span class="tag" style="background:#1f2937;color:#6b7280">● Market Closed</span>';
 }
 updateMarket(); setInterval(updateMarket,30000);
 
-// Trigger Scan
 function triggerScan(){
   const btn=document.getElementById('scanBtn');
   const banner=document.getElementById('scanBanner');
@@ -508,13 +457,12 @@ function triggerScan(){
 function pollStatus(){
   setTimeout(()=>{
     fetch('/api/status').then(r=>r.json()).then(d=>{
-      if(d.scanning) pollStatus();
+      if(d.scanning)pollStatus();
       else location.reload();
     });
   },5000);
 }
 
-// Filter tabs
 function filter(type){
   document.querySelectorAll('.ftab').forEach(b=>b.classList.remove('active'));
   document.getElementById('f-'+type).classList.add('active');
@@ -524,7 +472,6 @@ function filter(type){
   });
 }
 
-// Auto-refresh every 10 min if market open
 setInterval(()=>{
   const ist=new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'}));
   const h=ist.getHours(),m=ist.getMinutes(),d=ist.getDay();
@@ -566,7 +513,7 @@ def callback():
 
         threading.Thread(target=load_instruments, args=(kite,), daemon=True).start()
         threading.Thread(target=auto_scan_loop,                  daemon=True).start()
-        time.sleep(3)  # let instruments load a bit
+        time.sleep(4)  # let instruments load before first scan
         threading.Thread(target=run_scanner,                     daemon=True).start()
 
         return redirect('/')
