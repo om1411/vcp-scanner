@@ -46,20 +46,19 @@ def load_instruments(kite):
         instruments = kite.instruments("NSE")
 
         # Token map for all NSE EQ stocks
+        eq_stocks = [
+            i for i in instruments
+            if i['exchange'] == 'NSE' and i['instrument_type'] == 'EQ'
+        ]
+
         state['instruments'] = {
             i['tradingsymbol']: i['instrument_token']
-            for i in instruments
-            if i['exchange'] == 'NSE' and i['instrument_type'] == 'EQ'
+            for i in eq_stocks
         }
 
-        # Pre-filter: remove penny stocks (price < ₹20)
-        UNIVERSE = [
-            i['tradingsymbol']
-            for i in instruments
-            if (i['exchange'] == 'NSE' and
-                i['instrument_type'] == 'EQ' and
-                float(i.get('last_price') or 0) >= 20)
-        ]
+        # Universe = all NSE EQ stocks
+        # (penny stock filter happens inside analyze_vcp using actual historical data)
+        UNIVERSE = [i['tradingsymbol'] for i in eq_stocks]
 
         logger.info(f"Instruments loaded: {len(state['instruments'])} | Universe: {len(UNIVERSE)} stocks")
 
@@ -209,6 +208,17 @@ def analyze_vcp(symbol):
 # ── Background Scanner ─────────────────────────────────────
 def run_scanner():
     if state['scanning'] or not state['authenticated']:
+        return
+
+    # Wait up to 60s for instruments to load (fixes race condition after login)
+    waited = 0
+    while len(UNIVERSE) == 0 and waited < 60:
+        logger.info(f"Waiting for instruments... ({waited}s)")
+        time.sleep(2)
+        waited += 2
+
+    if len(UNIVERSE) == 0:
+        state['log'].append("❌ Scanner aborted — UNIVERSE empty. Try Scan Now in 30 seconds.")
         return
 
     state['scanning'] = True
@@ -542,6 +552,19 @@ def api_status():
 @app.route('/api/watchlist')
 def api_watchlist():
     return jsonify({'watchlist': state['watchlist'], 'last_scan': state['last_scan']})
+
+@app.route('/debug')
+def debug():
+    return jsonify({
+        'authenticated':    state['authenticated'],
+        'scanning':         state['scanning'],
+        'last_scan':        state['last_scan'],
+        'universe_size':    len(UNIVERSE),
+        'instruments_size': len(state['instruments']),
+        'watchlist_count':  len(state['watchlist']),
+        'log':              state['log'],
+        'universe_sample':  UNIVERSE[:10] if UNIVERSE else [],
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
