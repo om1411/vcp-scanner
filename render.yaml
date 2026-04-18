@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: vcp-scanner
+    env: python
+    region: singapore
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --timeout 120 --workers 1
+    envVars:
+      - key: KITE_API_KEY
+        value: YOUR_API_KEY_HERE
+      - key: KITE_API_SECRET
+        value: YOUR_API_SECRET_HERE
+      - key: FLASK_SECRET_KEY
+        generateValue: true
